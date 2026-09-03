@@ -12,6 +12,7 @@ jobs:
   tests:
     name: PHP ${{ matrix.php }} - ${{ matrix.deps }}
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: true
       matrix:
@@ -40,11 +41,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: ${{ runner.os }}-composer-
+          key: ${{ runner.os }}-composer-${{ matrix.php }}-${{ matrix.deps }}-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-${{ matrix.php }}-${{ matrix.deps }}-
+            ${{ runner.os }}-composer-
 
       - name: Install dependencies
-        run: composer update --no-interaction --prefer-dist --prefer-${{ matrix.deps }}
+        run: |
+          if [ "${{ matrix.deps }}" = "lowest" ]; then
+            composer update --no-interaction --prefer-dist --prefer-lowest
+          else
+            composer update --no-interaction --prefer-dist
+          fi
 
       - name: Validate composer.json
         run: composer validate --no-check-publish
