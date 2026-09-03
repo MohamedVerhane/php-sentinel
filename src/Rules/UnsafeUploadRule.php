@@ -114,16 +114,20 @@ final class UnsafeUploadRule extends AbstractRule
 
         // Issue 1: destination/name derived from user-controlled file name.
         $destination = $this->destinationExpression($node);
-        $resolved = $destination !== null ? $this->resolveValue($destination, $assignments) : null;
-        if ($resolved !== null && $this->referencesFiles($resolved)) {
-            $findings[] = $this->makeFinding(
-                'Unsafe Upload Destination',
-                'The uploaded file destination/name is derived from user-controlled $_FILES data without generating '
-                    . 'a safe random name. Use a server-generated name and validate the real file type.',
-                $context,
-                $destination,
-                ['issue' => 'user-controlled-filename'],
-            );
+
+        if ($destination !== null) {
+            $resolved = $this->resolveValue($destination, $assignments);
+
+            if ($resolved !== null && $this->referencesFiles($resolved)) {
+                $findings[] = $this->makeFinding(
+                    'Unsafe Upload Destination',
+                    'The uploaded file destination/name is derived from user-controlled $_FILES data without generating '
+                        . 'a safe random name. Use a server-generated name and validate the real file type.',
+                    $context,
+                    $destination,
+                    ['issue' => 'user-controlled-filename'],
+                );
+            }
         }
 
         // Issue 2: no detectable validation in the same scope.
@@ -240,7 +244,7 @@ final class UnsafeUploadRule extends AbstractRule
      */
     private function hasValidation(array $statements): bool
     {
-        $found = (new NodeFinder())->find($statements, static fn (Node $candidate): bool => (
+        $found = (new NodeFinder())->find($statements, static fn(Node $candidate): bool => (
             $candidate instanceof Expr\FuncCall
             && $candidate->name instanceof Node\Name
             && in_array(
