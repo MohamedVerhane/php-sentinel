@@ -64,4 +64,18 @@ final class UnsafeUploadRuleTest extends TestCase
 
         self::assertSame([], $this->analyzeWithRule($code, 'SEC005'));
     }
+
+    public function testValidationAfterMoveDoesNotSuppressFinding(): void
+    {
+        // Redesign: a validation that runs *after* move_uploaded_file() is too
+        // late to protect the file, so it must not suppress the finding.
+        $code = <<<'PHP'
+            <?php
+            move_uploaded_file($_FILES['f']['tmp_name'], '/uploads/x');
+            $mime = finfo_file(finfo_open(FILEINFO_MIME_TYPE), $_FILES['f']['tmp_name']);
+            PHP;
+
+        $titles = array_map(static fn ($finding) => $finding->title, $this->analyzeWithRule($code, 'SEC005'));
+        self::assertContains('Upload Without File-Type Validation', $titles);
+    }
 }

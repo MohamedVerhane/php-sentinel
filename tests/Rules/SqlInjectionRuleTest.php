@@ -106,4 +106,39 @@ final class SqlInjectionRuleTest extends TestCase
         self::assertNotEmpty($finding->description);
         self::assertNotEmpty($finding->recommendation);
     }
+
+    public function testDoesNotFlagQueryOnNonDatabaseReceiver(): void
+    {
+        // Receiver-type awareness: `->query()` on a non-database object (e.g. an
+        // HTTP client) is not a SQL sink, so it must not be reported.
+        $code = <<<'PHP'
+            <?php
+            $http = new HttpClient();
+            $http->query('SELECT ... ', $_GET['id']);
+            PHP;
+
+        self::assertSame([], $this->analyzeWithRule($code, 'SEC001'));
+    }
+
+    public function testDetectsQueryOnNewPdoInstance(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $pdo = new PDO('sqlite::memory:');
+            $pdo->query('SELECT * FROM users WHERE id = ' . $_GET['id']);
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC001'));
+    }
+
+    public function testDetectsPgQueryFunctionSink(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $id = $_GET['id'];
+            $result = pg_query($conn, 'SELECT * FROM t WHERE id = ' . $id);
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC001'));
+    }
 }

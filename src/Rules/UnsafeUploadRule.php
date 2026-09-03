@@ -130,8 +130,9 @@ final class UnsafeUploadRule extends AbstractRule
             }
         }
 
-        // Issue 2: no detectable validation in the same scope.
-        if (!$this->hasValidation($scopeNodes)) {
+        // Issue 2: no detectable validation in the same scope, happening before
+        // the move. Validation that appears after the move cannot protect it.
+        if (!$this->hasValidation($scopeNodes, $node->getStartLine())) {
             $this->appendFinding($findings, $this->makeFinding(
                 'Upload Without File-Type Validation',
                 'move_uploaded_file() is used without detectable validation of the file type, MIME type or extension. '
@@ -240,24 +241,34 @@ final class UnsafeUploadRule extends AbstractRule
     }
 
     /**
+     * Returns true when a file-type / MIME / extension validation appears in the
+     * given statements on a line at or before `$moveLine`.
+     *
      * @param list<Node> $statements
      */
-    private function hasValidation(array $statements): bool
+    private function hasValidation(array $statements, int $moveLine): bool
     {
-        $found = (new NodeFinder())->find($statements, static fn(Node $candidate): bool => (
-            $candidate instanceof Expr\FuncCall
-            && $candidate->name instanceof Node\Name
-            && in_array(
-                $candidate->name->toLowerString(),
-                self::VALIDATION_FUNCTIONS,
-                true,
-            )
-        ));
+        $found = (new NodeFinder())->find(
+            $statements,
+            static fn (Node $candidate): bool => (
+                $candidate->getStartLine() <= $moveLine
+                && $candidate instanceof Expr\FuncCall
+                && $candidate->name instanceof Node\Name
+                && in_array(
+                    $candidate->name->toLowerString(),
+                    self::VALIDATION_FUNCTIONS,
+                    true,
+                )
+            ),
+        );
 
         // Also detect direct MIME comparisons such as $mime === 'image/png'.
         $mimeLiteral = (new NodeFinder())->find(
             $statements,
-            static function (Node $candidate): bool {
+            static function (Node $candidate) use ($moveLine): bool {
+                if ($candidate->getStartLine() > $moveLine) {
+                    return false;
+                }
                 if ($candidate instanceof Expr\BinaryOp) {
                     foreach ([$candidate->left, $candidate->right] as $operand) {
                         if ($operand instanceof Node\Scalar\String_ && str_contains($operand->value, 'image/')) {

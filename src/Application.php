@@ -6,7 +6,6 @@ namespace PhpSentinel;
 
 use PhpSentinel\Command\ScanCommand;
 use PhpSentinel\Config\ConfigurationLoader;
-use PhpSentinel\Discovery\FileDiscovery;
 use PhpSentinel\Parser\PhpParser;
 use PhpSentinel\Report\Report;
 use PhpSentinel\Rules\RuleRegistry;
@@ -26,9 +25,8 @@ final class Application
     {
         $parser = new PhpParser();
         $registry = RuleRegistry::withDefaultRules();
-        $discovery = new FileDiscovery();
         $fileScanner = new FileScanner($parser);
-        $scanner = new Scanner($discovery, $fileScanner, $registry);
+        $scanner = new Scanner($fileScanner, $registry);
         $scanner->setVersion(self::VERSION);
 
         $report = new Report();

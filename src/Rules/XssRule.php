@@ -90,7 +90,10 @@ final class XssRule extends AbstractRule
             }
 
             $name = $this->functionName($node->name);
-            if ($name === 'printf' || $name === 'sprintf' || $name === 'vprintf') {
+            if ($name === 'printf' || $name === 'vprintf') {
+                // Only printf/vprintf emit output directly. sprintf returns a
+                // string, so its taint is tracked by the taint analyzer and
+                // reported once at the surrounding echo/print sink.
                 $findings = [];
                 foreach ($node->getArgs() as $arg) {
                     if (!$arg->value instanceof Expr) {

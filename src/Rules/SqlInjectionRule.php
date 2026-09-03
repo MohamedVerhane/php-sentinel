@@ -33,6 +33,13 @@ final class SqlInjectionRule extends AbstractRule
     private const FUNCTION_SINKS = [
         'mysqli_query' => 1,
         'mysqli_multi_query' => 1,
+        'mysqli_execute_query' => 1,
+        'pg_query' => 1,
+        'sqlsrv_query' => 1,
+        'sqlite_query' => 1,
+        'odbc_exec' => 1,
+        'mssql_query' => 0,
+        'db_query' => 1,
     ];
 
     /**
@@ -42,6 +49,39 @@ final class SqlInjectionRule extends AbstractRule
      * @var list<string>
      */
     private const METHOD_SINKS = ['query', 'exec', 'multi_query'];
+
+    /**
+     * Variable names commonly used to hold a database connection/handle. Method
+     * sinks are only reported when the receiver looks like a database handle,
+     * which avoids false positives on unrelated `->query()` / `->exec()` calls.
+     *
+     * @var list<string>
+     */
+    private const DB_RECEIVER_NAMES = [
+        'pdo',
+        'mysqli',
+        'db',
+        'dbh',
+        'dbi',
+        'conn',
+        'connection',
+        'database',
+        'sqlite',
+        'sqlite3',
+        'mysql',
+        'sql',
+        'sqlsrv',
+        'pg',
+        'handle',
+        'handler',
+    ];
+
+    /**
+     * Database class names (lower-cased) recognised when constructed inline.
+     *
+     * @var list<string>
+     */
+    private const DB_RECEIVER_CLASSES = ['pdo', 'mysqli', 'sqlite3'];
 
     private const SINK_CATEGORY = 'sql';
 
@@ -99,12 +139,43 @@ final class SqlInjectionRule extends AbstractRule
             }
 
             $method = strtolower($node->name->toString());
-            if (in_array($method, self::METHOD_SINKS, true)) {
+            if (in_array($method, self::METHOD_SINKS, true) && $this->isSqlReceiver($node)) {
                 return $this->checkSink($node, 0, $context, $node);
             }
         }
 
         return [];
+    }
+
+    /**
+     * Returns true when the receiver of a method call looks like a database
+     * handle, based on the variable name or the constructed class.
+     */
+    private function isSqlReceiver(Expr\MethodCall|Expr\StaticCall $call): bool
+    {
+        if ($call instanceof Expr\MethodCall) {
+            $receiver = $call->var;
+        } else {
+            $receiver = $call->class;
+        }
+
+        if ($receiver instanceof Expr\New_) {
+            if ($receiver->class instanceof Node\Name) {
+                return in_array(strtolower($receiver->class->toString()), self::DB_RECEIVER_CLASSES, true);
+            }
+
+            return false;
+        }
+
+        $name = $receiver instanceof Expr\Variable && is_string($receiver->name)
+            ? strtolower($receiver->name)
+            : null;
+
+        if ($name === null) {
+            return true;
+        }
+
+        return in_array($name, self::DB_RECEIVER_NAMES, true);
     }
 
     /**

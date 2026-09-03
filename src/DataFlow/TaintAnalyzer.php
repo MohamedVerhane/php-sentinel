@@ -11,6 +11,7 @@ use PhpParser\Node\Name;
 use PhpParser\Node\Scalar\EncapsedStringPart;
 use PhpParser\Node\Scalar\InterpolatedString;
 use PhpParser\Node\Stmt;
+use PhpParser\NodeFinder;
 
 /**
  * A lightweight, real inter-procedural-by-approximation taint analyzer.
@@ -19,6 +20,15 @@ use PhpParser\Node\Stmt;
  * user-controlled sources (the PHP superglobals), propagates taint through
  * assignments, concatenation, interpolation, casts and function arguments, and
  * honours category-aware sanitizers. It never executes the scanned code.
+ *
+ * Scopes are modelled pragmatically: function, method and closure bodies are
+ * analysed in an isolated child scope that is discarded afterwards, so a
+ * function body never clobbers the surrounding scope and locals never leak
+ * between functions. Branching statements (if/switch/try) merge their paths
+ * using a must-taint rule: a value is only considered tainted after a branch
+ * structure when it is tainted identically on every path. User-defined
+ * functions and methods contribute their return taint (and tainted parameters)
+ * to the call sites that pass them tainted arguments.
  *
  * Rules query the analyzer to determine whether an expression that reaches a
  * dangerous sink is tainted without sanitization (see {@see isDangerous()}).
@@ -32,6 +42,20 @@ final class TaintAnalyzer
      * @var list<string>
      */
     private const SUPERGLOBALS = ['_GET', '_POST', '_REQUEST', '_COOKIE', '_SERVER', '_FILES'];
+
+    /**
+     * User-defined functions and methods indexed by lower-cased name.
+     *
+     * @var array<string, array{params: list<string>, stmts: list<Node\Stmt>}>
+     */
+    private array $functions = [];
+
+    /**
+     * Names of functions currently being resolved, to guard against recursion.
+     *
+     * @var array<string, true>
+     */
+    private array $resolving = [];
 
     public function __construct(
         private readonly DataFlowContext $context,
@@ -50,7 +74,9 @@ final class TaintAnalyzer
      */
     public function analyze(array $statements): void
     {
+        $this->buildIndex($statements);
         $this->propagateStatements($statements);
+        $this->bindTaintedMethodParameters($statements);
     }
 
     /**
@@ -76,6 +102,141 @@ final class TaintAnalyzer
     }
 
     /**
+     * Indexes the user-defined functions and methods declared in the AST so
+     * that their parameters and return statements can be resolved at call
+     * sites.
+     *
+     * @param list<Node\Stmt> $statements
+     */
+    private function buildIndex(array $statements): void
+    {
+        if ($statements === []) {
+            return;
+        }
+
+        $nodes = (new NodeFinder())->find($statements, static fn (Node $node): bool => true);
+
+        foreach ($nodes as $node) {
+            if ($node instanceof Stmt\Function_) {
+                $name = strtolower($node->name->toString());
+                $this->functions[$name] = [
+                    'params' => $this->parameterNames($node->params),
+                    'stmts' => array_values($node->stmts ?? []),
+                ];
+            } elseif ($node instanceof Stmt\ClassMethod) {
+                $name = strtolower($node->name->toString());
+                $this->functions[$name] = [
+                    'params' => $this->parameterNames($node->params),
+                    'stmts' => array_values($node->stmts ?? []),
+                ];
+            }
+        }
+    }
+
+    /**
+     * Returns the lower-cased names of a parameter list.
+     *
+     * @param list<Node\Param> $params
+     *
+     * @return list<string>
+     */
+    private function parameterNames(array $params): array
+    {
+        $names = [];
+        foreach ($params as $param) {
+            if ($param->var instanceof Expr\Variable && is_string($param->var->name)) {
+                $names[] = $param->var->name;
+            }
+        }
+
+        return $names;
+    }
+
+    /**
+     * After the main pass, binds taint to the parameters of user-defined
+     * methods that are invoked with tainted arguments. This lets sinks inside a
+     * method body (e.g. an `echo $param` inside a method called with `$_GET`)
+     * be reported even though the method body is analysed in an isolated scope.
+     *
+     * @param list<Node\Stmt> $statements
+     */
+    private function bindTaintedMethodParameters(array $statements): void
+    {
+        if ($statements === [] || $this->functions === []) {
+            return;
+        }
+
+        $taintedCalls = $this->findTaintedMethodCalls($statements);
+
+        foreach ($taintedCalls as $name => $sources) {
+            $params = $this->functions[$name]['params'] ?? [];
+            if ($params === []) {
+                continue;
+            }
+
+            foreach ($params as $param) {
+                [$existingSources, $existingSanitized] = $this->mergeEntries(
+                    $this->context->entry($param),
+                    ['taintedSources' => $sources, 'sanitizedFor' => []],
+                );
+                $this->context->set($param, $existingSources, $existingSanitized);
+            }
+        }
+    }
+
+    /**
+     * Collects the method names invoked with at least one tainted argument
+     * anywhere in the AST.
+     *
+     * @param list<Node\Stmt> $statements
+     *
+     * @return array<string, list<string>> method name => merged source names
+     */
+    private function findTaintedMethodCalls(array $statements): array
+    {
+        $calls = [];
+        $nodes = (new NodeFinder())->find(
+            $statements,
+            static fn (Node $node): bool => $node instanceof Expr\MethodCall || $node instanceof Expr\StaticCall,
+        );
+
+        foreach ($nodes as $node) {
+            $name = $this->methodCallName($node);
+            if ($name === null || !isset($this->functions[$name])) {
+                continue;
+            }
+            if (!$node instanceof Expr\MethodCall && !$node instanceof Expr\StaticCall) {
+                continue;
+            }
+            $sources = $this->collectArgumentSources($node->args);
+            $sources = array_values(array_unique($sources));
+            if ($sources === []) {
+                continue;
+            }
+            $calls[$name] = array_values(array_unique(array_merge($calls[$name] ?? [], $sources)));
+        }
+
+        return $calls;
+    }
+
+    private function methodCallName(Node $node): ?string
+    {
+        if ($node instanceof Expr\MethodCall) {
+            $name = $node->name;
+        } elseif ($node instanceof Expr\StaticCall) {
+            $name = $node->name;
+        } else {
+            return null;
+        }
+
+        if ($name instanceof Identifier) {
+            return strtolower($name->toString());
+        }
+
+        return null;
+    }
+
+    /**
      * Propagates taint through a list of statements in order.
      *
      * @param list<Node\Stmt> $statements
@@ -96,13 +257,28 @@ final class TaintAnalyzer
         }
 
         if ($statement instanceof Stmt\If_) {
+            $before = $this->context->snapshot();
+            $paths = [];
+
+            $this->context->restore($before);
             $this->propagateStatements($statement->stmts);
+            $paths[] = $this->context->snapshot();
+
             foreach ($statement->elseifs as $elseIf) {
+                $this->context->restore($before);
                 $this->propagateStatements($elseIf->stmts);
+                $paths[] = $this->context->snapshot();
             }
+
             if ($statement->else !== null) {
+                $this->context->restore($before);
                 $this->propagateStatements($statement->else->stmts);
+                $paths[] = $this->context->snapshot();
+            } else {
+                $paths[] = $before;
             }
+
+            $this->context->restore(DataFlowContext::mergeStates($paths));
 
             return;
         }
@@ -139,21 +315,49 @@ final class TaintAnalyzer
         }
 
         if ($statement instanceof Stmt\Switch_) {
+            $before = $this->context->snapshot();
+            $paths = [];
+            $hasDefault = false;
+
             foreach ($statement->cases as $case) {
+                $this->context->restore($before);
                 $this->propagateStatements($case->stmts);
+                $paths[] = $this->context->snapshot();
+                if ($case->cond === null) {
+                    $hasDefault = true;
+                }
             }
+
+            if (!$hasDefault) {
+                $paths[] = $before;
+            }
+
+            $this->context->restore(DataFlowContext::mergeStates($paths));
 
             return;
         }
 
         if ($statement instanceof Stmt\TryCatch) {
+            $before = $this->context->snapshot();
+            $paths = [];
+
+            $this->context->restore($before);
             $this->propagateStatements($statement->stmts);
+            $paths[] = $this->context->snapshot();
+
             foreach ($statement->catches as $catch) {
+                $this->context->restore($before);
                 $this->propagateStatements($catch->stmts);
+                $paths[] = $this->context->snapshot();
             }
+
             if ($statement->finally !== null) {
+                $this->context->restore($before);
                 $this->propagateStatements($statement->finally->stmts);
+                $paths[] = $this->context->snapshot();
             }
+
+            $this->context->restore(DataFlowContext::mergeStates($paths));
 
             return;
         }
@@ -180,8 +384,10 @@ final class TaintAnalyzer
      */
     private function analyzeFunctionBody(array $statements): void
     {
+        $snapshot = $this->context->snapshot();
         $this->context->reset();
         $this->propagateStatements($statements);
+        $this->context->restore($snapshot);
     }
 
     private function propagateExpr(Node\Expr $expr): void
@@ -393,9 +599,79 @@ final class TaintAnalyzer
             if ($categories !== []) {
                 return ['taintedSources' => $argumentSources, 'sanitizedFor' => $categories];
             }
+
+            if (isset($this->functions[$name])) {
+                return $this->resolveUserFunctionReturn($name, $argumentSources);
+            }
         }
 
         return ['taintedSources' => $argumentSources, 'sanitizedFor' => []];
+    }
+
+    /**
+     * Resolves the taint contributed by a user-defined function's return
+     * statement(s) for the given call site, binding the call args to the
+     * function parameters.
+     *
+     * @param list<string> $callSources
+     *
+     * @return array{taintedSources: list<string>, sanitizedFor: list<string>}
+     */
+    private function resolveUserFunctionReturn(string $name, array $callSources): array
+    {
+        $definition = $this->functions[$name];
+        if (isset($this->resolving[$name])) {
+            return ['taintedSources' => $callSources, 'sanitizedFor' => []];
+        }
+
+        $this->resolving[$name] = true;
+        $snapshot = $this->context->snapshot();
+        $this->context->reset();
+
+        foreach ($definition['params'] as $param) {
+            $this->context->set($param, $callSources, []);
+        }
+
+        $this->propagateStatements($definition['stmts']);
+        $return = $this->collectReturnTaint($definition['stmts']);
+
+        $this->context->restore($snapshot);
+        unset($this->resolving[$name]);
+
+        return $return;
+    }
+
+    /**
+     * Merges the taint of all top-level `return` statements in a function body.
+     *
+     * @param list<Node\Stmt> $statements
+     *
+     * @return array{taintedSources: list<string>, sanitizedFor: list<string>}
+     */
+    private function collectReturnTaint(array $statements): array
+    {
+        $sources = [];
+        $sanitized = [];
+        $found = false;
+
+        foreach ($statements as $statement) {
+            if ($statement instanceof Stmt\Return_) {
+                if ($statement->expr instanceof Expr) {
+                    $resolved = $this->resolve($statement->expr);
+                    [$sources, $sanitized] = $this->mergeEntries(
+                        ['taintedSources' => $sources, 'sanitizedFor' => $sanitized],
+                        $resolved,
+                    );
+                    $found = true;
+                }
+            }
+        }
+
+        if (!$found) {
+            return ['taintedSources' => [], 'sanitizedFor' => []];
+        }
+
+        return ['taintedSources' => $sources, 'sanitizedFor' => $sanitized];
     }
 
     /**

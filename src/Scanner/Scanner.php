@@ -22,7 +22,6 @@ final class Scanner
     private string $version = 'dev';
 
     public function __construct(
-        private readonly FileDiscovery $discovery,
         private readonly FileScanner $fileScanner,
         private readonly RuleRegistry $registry,
     ) {
@@ -48,7 +47,8 @@ final class Scanner
         $start = microtime(true);
 
         $enabledRules = $this->registry->enabled($config->enabledRules);
-        $discoveryResult = $this->discovery->discover($config->paths);
+        $discovery = new FileDiscovery($config->extensions, $config->ignoredPaths);
+        $discoveryResult = $discovery->discover($config->paths);
 
         $total = count($discoveryResult->files());
         $done = 0;

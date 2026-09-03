@@ -15,7 +15,7 @@ final class FileDiscovery
 {
     /**
      * @param list<string> $extensions    file extensions to consider (no leading dot)
-     * @param list<string> $ignoredPaths  path components or trailing names to ignore
+     * @param list<string> $ignoredPaths  names, relative path patterns, or globs to ignore
      */
     public function __construct(
         private array $extensions = ['php', 'phtml', 'inc'],
@@ -56,7 +56,8 @@ final class FileDiscovery
             }
 
             if (is_dir($real)) {
-                $this->walk($real, $real, $files, $skipped);
+                $baseRel = $this->relativeToBase(getcwd() ?: $real, $real);
+                $this->walk($real, $real, $baseRel, $files, $skipped);
                 continue;
             }
         }
@@ -70,7 +71,7 @@ final class FileDiscovery
      * @param list<string> $files
      * @param list<string> $skipped
      */
-    private function walk(string $root, string $dir, array &$files, array &$skipped): void
+    private function walk(string $root, string $dir, string $relDir, array &$files, array &$skipped): void
     {
         $entries = @scandir($dir);
 
@@ -86,13 +87,14 @@ final class FileDiscovery
             }
 
             $path = $dir . DIRECTORY_SEPARATOR . $entry;
+            $relPath = $relDir === '' ? $entry : $relDir . '/' . $entry;
 
-            if ($this->isIgnored(basename($entry))) {
+            if ($this->isIgnored($relPath)) {
                 continue;
             }
 
             if (is_dir($path)) {
-                $this->walk($root, $path, $files, $skipped);
+                $this->walk($root, $path, $relPath, $files, $skipped);
 
                 continue;
             }
@@ -115,17 +117,57 @@ final class FileDiscovery
     }
 
     /**
-     * Applies ignore rules. An entry is ignored when its basename (or any path
-     * component) matches one of the configured ignored path fragments.
+     * Applies ignore rules against an entry's path relative to the walk root.
+     *
+     * A pattern is matched when any of the following holds:
+     *
+     *  1. It is a bare name (no `/`) equal to any single path component.
+     *  2. It contains `/` and equals the relative path or is a leading subtree
+     *     of it, or is a trailing path fragment of it (e.g. `tests/Fixtures`).
+     *  3. It contains a glob wildcard (`*`, `?`, `[`) and {@see fnmatch()}
+     *     matches the relative path.
      */
-    private function isIgnored(string $basename): bool
+    private function isIgnored(string $relPath): bool
     {
+        $relPath = str_replace('\\', '/', $relPath);
+        $lowerRel = strtolower($relPath);
+
         foreach ($this->ignoredPaths as $ignored) {
+            $ignored = trim($ignored);
             if ($ignored === '') {
                 continue;
             }
+            $pattern = str_replace('\\', '/', $ignored);
 
-            if (strcasecmp($basename, $ignored) === 0) {
+            if (strpbrk($pattern, '*?[') !== false) {
+                if (fnmatch($pattern, $relPath, FNM_CASEFOLD | FNM_PATHNAME)) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (!str_contains($pattern, '/')) {
+                foreach (explode('/', $relPath) as $component) {
+                    if (strcasecmp($component, $pattern) === 0) {
+                        return true;
+                    }
+                }
+
+                continue;
+            }
+
+            $pattern = trim($pattern, '/');
+            $lowerPattern = strtolower($pattern);
+
+            // Exact match, leading subtree, or trailing fragment of the path.
+            if ($lowerRel === $lowerPattern) {
+                return true;
+            }
+            if (str_starts_with($lowerRel, $lowerPattern . '/')) {
+                return true;
+            }
+            if (str_ends_with($lowerRel, '/' . $lowerPattern)) {
                 return true;
             }
         }
@@ -148,6 +190,24 @@ final class FileDiscovery
         $path = preg_replace('#[\\\\/]{2,}#', DIRECTORY_SEPARATOR, $path) ?? $path;
 
         return $path;
+    }
+
+    /**
+     * Returns the path of `$path` relative to `$base`, using forward slashes,
+     * so that ignore patterns can be interpreted relative to the working
+     * directory. Falls back to the leaf name when the path is not inside the
+     * base.
+     */
+    private function relativeToBase(string $base, string $path): string
+    {
+        $base = rtrim(str_replace('\\', '/', $base), '/');
+        $path = str_replace('\\', '/', $path);
+
+        if ($base !== '' && strncasecmp($path, $base . '/', strlen($base) + 1) === 0) {
+            return substr($path, strlen($base) + 1);
+        }
+
+        return basename($path);
     }
 
     /**

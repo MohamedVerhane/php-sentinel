@@ -6,7 +6,6 @@ namespace PhpSentinel\Tests;
 
 use PhpParser\ParserFactory;
 use PhpSentinel\Config\Configuration;
-use PhpSentinel\Discovery\FileDiscovery;
 use PhpSentinel\Parser\PhpParser;
 use PhpSentinel\Rules\RuleRegistry;
 use PhpSentinel\Scanner\FileScanner;
@@ -23,7 +22,6 @@ final class ScannerIntegrationTest extends TestCase
         $registry = RuleRegistry::withDefaultRules();
         $parser = new PhpParser((new ParserFactory())->createForNewestSupportedVersion());
         $this->scanner = new Scanner(
-            new FileDiscovery(),
             new FileScanner($parser),
             $registry,
         );

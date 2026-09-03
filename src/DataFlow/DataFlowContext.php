@@ -89,6 +89,87 @@ final class DataFlowContext
         $this->variables = [];
     }
 
+    /**
+     * Returns a raw snapshot of the current variable state, suitable for later
+     * restoration with {@see restore()}.
+     *
+     * @return array<string, array{taintedSources: list<string>, sanitizedFor: list<string>}>
+     */
+    public function snapshot(): array
+    {
+        return $this->variables;
+    }
+
+    /**
+     * Replaces the whole variable state with a snapshot produced by
+     * {@see snapshot()}. Used to isolate nested scopes (branches, functions).
+     *
+     * @param array<string, array{taintedSources: list<string>, sanitizedFor: list<string>}> $state
+     */
+    public function restore(array $state): void
+    {
+        $this->variables = $state;
+    }
+
+    /**
+     * Computes a must-taint merge across a set of branch-path states.
+     *
+     * Each element of `$paths` is a snapshot as produced by {@see snapshot()}
+     * (a variable-name => entry map). Only variables that are defined with an
+     * identical entry on every path are carried into the merged result. A
+     * variable that is clean on one path but tainted on another is not
+     * propagated, which avoids reporting findings derived from a single branch.
+     *
+     * @param list<array<string, array{taintedSources: list<string>, sanitizedFor: list<string>}>> $paths
+     *
+     * @return array<string, array{taintedSources: list<string>, sanitizedFor: list<string>}>
+     */
+    public static function mergeStates(array $paths): array
+    {
+        if ($paths === []) {
+            return [];
+        }
+
+        $variableNames = [];
+        foreach ($paths as $state) {
+            foreach (array_keys($state) as $name) {
+                $variableNames[$name] = true;
+            }
+        }
+
+        $merged = [];
+        foreach (array_keys($variableNames) as $variable) {
+            $defined = [];
+            $identical = true;
+
+            foreach ($paths as $state) {
+                if (!array_key_exists($variable, $state)) {
+                    $identical = false;
+                    break;
+                }
+                $defined[] = $state[$variable];
+            }
+
+            if (!$identical || $defined === []) {
+                continue;
+            }
+
+            $first = $defined[0];
+            foreach ($defined as $entry) {
+                if ($entry !== $first) {
+                    $identical = false;
+                    break;
+                }
+            }
+
+            if ($identical) {
+                $merged[$variable] = $first;
+            }
+        }
+
+        return $merged;
+    }
+
     public function hasSanitizerFor(string $functionName, string $category): bool
     {
         foreach ($this->sanitizers as $sanitizer) {
