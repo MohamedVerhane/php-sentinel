@@ -141,4 +141,49 @@ final class SqlInjectionRuleTest extends TestCase
 
         self::assertCount(1, $this->analyzeWithRule($code, 'SEC001'));
     }
+
+    public function testDoesNotFlagQueryOnPlainVariableWithNonDbName(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $client->query('DELETE FROM x WHERE a = ' . $_GET['a']);
+            PHP;
+
+        // `$client` is not a recognised DB receiver name, so `->query()` is not
+        // treated as a SQL sink even though the argument is tainted.
+        self::assertSame([], $this->analyzeWithRule($code, 'SEC001'));
+    }
+
+    public function testPreparedStatementInsideMethodNotFlagged(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            class Repository {
+                public function find($id): void {
+                    $stmt = $this->pdo->prepare('SELECT * FROM users WHERE id = :id');
+                    $stmt->execute(['id' => $id]);
+                }
+            }
+            (new Repository())->find($_GET['id']);
+            PHP;
+
+        self::assertSame([], $this->analyzeWithRule($code, 'SEC001'));
+    }
+
+    public function testMethodBodySinkTaintedByCallArgumentReported(): void
+    {
+        // The scope-isolation fix must still report a SQL sink inside a method
+        // whose parameter is bound from a tainted call site.
+        $code = <<<'PHP'
+            <?php
+            class Dao {
+                public function byId($id): void {
+                    $this->db->query('SELECT * FROM users WHERE id = ' . $id);
+                }
+            }
+            (new Dao())->byId($_GET['id']);
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC001'));
+    }
 }

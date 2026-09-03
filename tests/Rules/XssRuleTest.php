@@ -91,4 +91,33 @@ final class XssRuleTest extends TestCase
 
         self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
     }
+
+    public function testEchoOfSprintfResultReportedExactlyOnce(): void
+    {
+        // sprintf() returns a string; it is only reported at the output sink,
+        // never a second time at the sprintf call itself.
+        $code = <<<'PHP'
+            <?php
+            echo sprintf('<b>%s</b>', $_GET['name']);
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
+    }
+
+    public function testMethodBodyEchoTaintedByCallArgumentReported(): void
+    {
+        // The scope-isolation fix must still report an XSS sink inside a method
+        // whose parameter is bound from a tainted call site.
+        $code = <<<'PHP'
+            <?php
+            class View {
+                public function render($name): void {
+                    echo $name;
+                }
+            }
+            (new View())->render($_GET['name']);
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
+    }
 }

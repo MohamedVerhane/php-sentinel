@@ -139,30 +139,43 @@ final class DataFlowContext
 
         $merged = [];
         foreach (array_keys($variableNames) as $variable) {
-            $defined = [];
-            $identical = true;
+            $entries = [];
+            $presentCount = 0;
 
             foreach ($paths as $state) {
                 if (!array_key_exists($variable, $state)) {
-                    $identical = false;
-                    break;
+                    continue;
                 }
-                $defined[] = $state[$variable];
+                $presentCount++;
+                $entries[] = $state[$variable];
             }
 
-            if (!$identical || $defined === []) {
+            if ($presentCount === 0) {
                 continue;
             }
 
-            $first = $defined[0];
-            foreach ($defined as $entry) {
+            // A variable that is only defined on a single branch of a multi-way
+            // structure is not carried past it: its value is undefined on the
+            // other path(s), so carrying it would create false positives for
+            // assignments that happen in just one branch.
+            if ($presentCount === 1 && count($paths) > 1) {
+                continue;
+            }
+
+            // The variable is carried only when it holds an identical entry on
+            // every path that defines it, which is what makes the taint a
+            // must-taint on the merge point. If any defining path yields a
+            // different entry (e.g. a clean value), the variable is dropped.
+            $allIdentical = true;
+            $first = $entries[0];
+            foreach ($entries as $entry) {
                 if ($entry !== $first) {
-                    $identical = false;
+                    $allIdentical = false;
                     break;
                 }
             }
 
-            if ($identical) {
+            if ($allIdentical) {
                 $merged[$variable] = $first;
             }
         }

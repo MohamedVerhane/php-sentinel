@@ -262,4 +262,151 @@ final class DataFlowRegressionTest extends TestCase
 
         self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
     }
+
+    // ----------------------------------------------- scope isolation (leaks) --
+
+    public function testMethodParamBindingDoesNotLeakToTopLevelVariable(): void
+    {
+        // Regression: binding taint to a method parameter used to write into the
+        // shared context by variable name, so an unrelated top-level variable
+        // with the same name was falsely reported.
+        $code = <<<'PHP'
+            <?php
+            class Handler {
+                public function show($value): void {
+                    echo $value;
+                }
+            }
+            $value = 'safe';
+            (new Handler())->show($_GET['x']);
+            echo $value;
+            PHP;
+
+        $findings = $this->analyzeWithRule($code, 'SEC002');
+        self::assertCount(1, $findings);
+        self::assertSame(4, $findings[0]->line);
+    }
+
+    public function testMethodParamBindingDoesNotLeakIntoSiblingFunction(): void
+    {
+        // The `show` method is called with tainted input; the sibling function
+        // `render` (called with a static argument) must not pick up that taint.
+        $code = <<<'PHP'
+            <?php
+            function render($value): void {
+                echo $value;
+            }
+            class Handler {
+                public function show($value): void {
+                    echo $value;
+                }
+            }
+            (new Handler())->show($_GET['x']);
+            render('static');
+            PHP;
+
+        $findings = $this->analyzeWithRule($code, 'SEC002');
+        self::assertCount(1, $findings);
+        self::assertSame(7, $findings[0]->line);
+    }
+
+    public function testClosureBodyDoesNotLeakTaintToEnclosingScope(): void
+    {
+        // The closure body is analysed in isolation, so taint (or its absence)
+        // inside it must never reach the enclosing `$value`.
+        $code = <<<'PHP'
+            <?php
+            $value = 'safe';
+            $closure = function ($value): void {
+                echo $value;
+            };
+            $closure($_GET['x']);
+            echo $value;
+            PHP;
+
+        self::assertSame([], $this->analyzeWithRule($code, 'SEC002'));
+    }
+
+    // --------------------------------------------------------- more branches --
+
+    public function testIfElseIfBothBranchesTaintedIsReported(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            if ($a) {
+                $x = $_GET['a'];
+            } elseif ($b) {
+                $x = $_GET['b'];
+            }
+            echo $x;
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
+    }
+
+    public function testIfElseIfOneBranchCleanOneTaintedNotPropagated(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $x = 'safe';
+            if ($a) {
+                $x = 'clean';
+            } elseif ($b) {
+                $x = $_GET['b'];
+            }
+            echo $x;
+            PHP;
+
+        self::assertSame([], $this->analyzeWithRule($code, 'SEC002'));
+    }
+
+    public function testForeachOverTaintedCollectionPropagatesToValue(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            foreach ($_GET['items'] as $item) {
+                echo $item;
+            }
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
+    }
+
+    public function testWhileLoopBodyTaintIsConservativelyPropagated(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $s = 'safe';
+            $i = 0;
+            while ($i < 10) {
+                $s = $_GET['x'];
+                $i++;
+            }
+            echo $s;
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
+    }
+
+    public function testTernaryWithTaintedBranchIsReported(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $x = $cond ? $_GET['a'] : 'safe';
+            echo $x;
+            PHP;
+
+        self::assertCount(1, $this->analyzeWithRule($code, 'SEC002'));
+    }
+
+    public function testTernaryWithOnlyCleanBranchesNotReported(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $x = $cond ? 'a' : 'safe';
+            echo $x;
+            PHP;
+
+        self::assertSame([], $this->analyzeWithRule($code, 'SEC002'));
+    }
 }

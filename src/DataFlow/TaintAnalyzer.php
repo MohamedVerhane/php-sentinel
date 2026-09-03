@@ -57,6 +57,37 @@ final class TaintAnalyzer
      */
     private array $resolving = [];
 
+    /**
+     * Index of every function-like scope, used to resolve an expression's
+     * lexical scope after the analysis pass.
+     *
+     * @var list<array{key: int, start: int, end: int}>
+     */
+    private array $scopeIndex = [];
+
+    /**
+     * Per-scope variable states captured when each function/method/closure body
+     * finished analysing. Keyed by {@see spl_object_id()} of the scope node.
+     *
+     * @var array<int, array<string, array{taintedSources: list<string>, sanitizedFor: list<string>}>>
+     */
+    private array $scopeStates = [];
+
+    /**
+     * Maps a lower-cased function/method name to the scope keys that declare it.
+     *
+     * @var array<string, list<int>>
+     */
+    private array $scopeKeysByName = [];
+
+    /**
+     * The final variable state of the top-level (global) scope, captured after
+     * the analysis pass. Used to resolve expressions not inside any function.
+     *
+     * @var array<string, array{taintedSources: list<string>, sanitizedFor: list<string>}>
+     */
+    private array $globalState = [];
+
     public function __construct(
         private readonly DataFlowContext $context,
     ) {
@@ -75,8 +106,10 @@ final class TaintAnalyzer
     public function analyze(array $statements): void
     {
         $this->buildIndex($statements);
+        $this->buildScopeIndex($statements);
         $this->propagateStatements($statements);
         $this->bindTaintedMethodParameters($statements);
+        $this->globalState = $this->context->snapshot();
     }
 
     /**
@@ -85,7 +118,7 @@ final class TaintAnalyzer
      */
     public function isDangerous(Expr $expr, string $category): bool
     {
-        $resolved = $this->resolve($expr);
+        $resolved = $this->resolveInScope($expr);
 
         return $resolved['taintedSources'] !== []
             && !in_array($category, $resolved['sanitizedFor'], true);
@@ -98,7 +131,44 @@ final class TaintAnalyzer
      */
     public function sourcesOf(Expr $expr): array
     {
-        return $this->resolve($expr)['taintedSources'];
+        return $this->resolveInScope($expr)['taintedSources'];
+    }
+
+    /**
+     * Indexes every function-like scope (function, method, closure) so that an
+     * expression can later be resolved against its own lexical scope rather
+     * than a single shared context.
+     *
+     * @param list<Node\Stmt> $statements
+     */
+    private function buildScopeIndex(array $statements): void
+    {
+        if ($statements === []) {
+            return;
+        }
+
+        $nodes = (new NodeFinder())->find($statements, static fn (Node $node): bool => true);
+
+        foreach ($nodes as $node) {
+            if (
+                $node instanceof Stmt\Function_
+                || $node instanceof Stmt\ClassMethod
+                || $node instanceof Expr\Closure
+                || $node instanceof Expr\ArrowFunction
+            ) {
+                $key = spl_object_id($node);
+                $this->scopeIndex[] = [
+                    'key' => $key,
+                    'start' => $node->getStartLine(),
+                    'end' => $node->getEndLine(),
+                ];
+
+                if ($node instanceof Stmt\Function_ || $node instanceof Stmt\ClassMethod) {
+                    $name = strtolower($node->name->toString());
+                    $this->scopeKeysByName[$name][] = $key;
+                }
+            }
+        }
     }
 
     /**
@@ -170,16 +240,27 @@ final class TaintAnalyzer
 
         foreach ($taintedCalls as $name => $sources) {
             $params = $this->functions[$name]['params'] ?? [];
-            if ($params === []) {
+            if ($params === [] || !isset($this->scopeKeysByName[$name])) {
                 continue;
             }
 
-            foreach ($params as $param) {
-                [$existingSources, $existingSanitized] = $this->mergeEntries(
-                    $this->context->entry($param),
-                    ['taintedSources' => $sources, 'sanitizedFor' => []],
-                );
-                $this->context->set($param, $existingSources, $existingSanitized);
+            // Bind the tainted arguments into the *declaring method's* scope
+            // state only, so that a top-level variable sharing a parameter name
+            // is never polluted by the binding.
+            foreach ($this->scopeKeysByName[$name] as $scopeKey) {
+                if (!isset($this->scopeStates[$scopeKey])) {
+                    continue;
+                }
+
+                $state = $this->scopeStates[$scopeKey];
+                foreach ($params as $param) {
+                    [$existingSources, $existingSanitized] = $this->mergeEntries(
+                        $state[$param] ?? ['taintedSources' => [], 'sanitizedFor' => []],
+                        ['taintedSources' => $sources, 'sanitizedFor' => []],
+                    );
+                    $state[$param] = ['taintedSources' => $existingSources, 'sanitizedFor' => $existingSanitized];
+                }
+                $this->scopeStates[$scopeKey] = $state;
             }
         }
     }
@@ -363,7 +444,7 @@ final class TaintAnalyzer
         }
 
         if ($statement instanceof Stmt\Function_ || $statement instanceof Stmt\ClassMethod) {
-            $this->analyzeFunctionBody(array_values($statement->stmts ?? []));
+            $this->analyzeFunctionBody($statement, array_values($statement->stmts ?? []));
 
             return;
         }
@@ -382,11 +463,12 @@ final class TaintAnalyzer
     /**
      * @param list<Node\Stmt> $statements
      */
-    private function analyzeFunctionBody(array $statements): void
+    private function analyzeFunctionBody(Node $scopeNode, array $statements): void
     {
         $snapshot = $this->context->snapshot();
         $this->context->reset();
         $this->propagateStatements($statements);
+        $this->scopeStates[spl_object_id($scopeNode)] = $this->context->snapshot();
         $this->context->restore($snapshot);
     }
 
@@ -410,13 +492,19 @@ final class TaintAnalyzer
 
         // Recursively propagate through nested function scopes in expressions.
         if ($expr instanceof Node\Expr\Closure) {
-            $this->analyzeFunctionBody(array_values($expr->stmts ?? []));
+            $this->analyzeFunctionBody($expr, array_values($expr->stmts ?? []));
 
             return;
         }
 
         if ($expr instanceof Node\Expr\ArrowFunction && $expr->expr instanceof Node\Expr) {
+            $snapshot = $this->context->snapshot();
+            $this->context->reset();
             $this->propagateExpr($expr->expr);
+            $this->scopeStates[spl_object_id($expr)] = $this->context->snapshot();
+            $this->context->restore($snapshot);
+
+            return;
         }
     }
 
@@ -447,6 +535,53 @@ final class TaintAnalyzer
             );
             $this->context->set($baseName, $sources, $sanitized);
         }
+    }
+
+    /**
+     * Resolves taint for a node that lives inside the AST, loading the variable
+     * state of the node's own lexical scope so that findings always use the
+     * correct scope and state never leaks between functions/methods. Falls back
+     * to the top-level state for nodes not inside any function-like scope.
+     *
+     * @return array{taintedSources: list<string>, sanitizedFor: list<string>}
+     */
+    private function resolveInScope(Expr $expr): array
+    {
+        $key = $this->scopeKeyForLine($expr->getStartLine());
+        $state = $key === null ? $this->globalState : ($this->scopeStates[$key] ?? []);
+
+        $snapshot = $this->context->snapshot();
+        $this->context->restore($state);
+
+        try {
+            return $this->resolve($expr);
+        } finally {
+            $this->context->restore($snapshot);
+        }
+    }
+
+    /**
+     * Returns the scope key of the innermost function-like scope whose line
+     * range contains `$line`, or null when the line is not inside any function.
+     */
+    private function scopeKeyForLine(int $line): ?int
+    {
+        $best = null;
+        $bestSize = null;
+
+        foreach ($this->scopeIndex as $scope) {
+            if ($line < $scope['start'] || $line > $scope['end']) {
+                continue;
+            }
+
+            $size = $scope['end'] - $scope['start'];
+            if ($bestSize === null || $size < $bestSize) {
+                $bestSize = $size;
+                $best = $scope['key'];
+            }
+        }
+
+        return $best;
     }
 
     /**

@@ -78,4 +78,77 @@ final class UnsafeUploadRuleTest extends TestCase
         $titles = array_map(static fn ($finding) => $finding->title, $this->analyzeWithRule($code, 'SEC005'));
         self::assertContains('Upload Without File-Type Validation', $titles);
     }
+
+    public function testUnrelatedValidationDoesNotSuppressFindingForMovedUpload(): void
+    {
+        // A MIME check on a *different* $_FILES field must not count as
+        // validation of the upload being moved.
+        $code = <<<'PHP'
+            <?php
+            $mime = finfo_file(finfo_open(FILEINFO_MIME_TYPE), $_FILES['other']['tmp_name']);
+            move_uploaded_file($_FILES['avatar']['tmp_name'], '/uploads/avatar');
+            PHP;
+
+        $titles = array_map(static fn ($finding) => $finding->title, $this->analyzeWithRule($code, 'SEC005'));
+        self::assertContains('Upload Without File-Type Validation', $titles);
+    }
+
+    public function testUnrelatedPathinfoInArrayDoesNotSuppressFinding(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $house = pathinfo('/etc/hosts', PATHINFO_EXTENSION);
+            echo in_array($house, ['csv', 'ini'], true) ? 'x' : 'y';
+            move_uploaded_file($_FILES['avatar']['tmp_name'], '/uploads/avatar');
+            PHP;
+
+        $titles = array_map(static fn ($finding) => $finding->title, $this->analyzeWithRule($code, 'SEC005'));
+        self::assertContains('Upload Without File-Type Validation', $titles);
+    }
+
+    public function testAuthenticityValidationOnSameUploadSuppressesMissingValidation(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            $tmp = $_FILES['avatar']['tmp_name'];
+            if (is_uploaded_file($tmp)) {
+                move_uploaded_file($tmp, '/uploads/avatar.png');
+            }
+            PHP;
+
+        $titles = array_map(static fn ($finding) => $finding->title, $this->analyzeWithRule($code, 'SEC005'));
+        self::assertNotContains('Upload Without File-Type Validation', $titles);
+    }
+
+    public function testSizeValidationOnSameUploadSuppressesMissingValidation(): void
+    {
+        $code = <<<'PHP'
+            <?php
+            if ($_FILES['avatar']['size'] > 0 && $_FILES['avatar']['size'] < 2000000) {
+                move_uploaded_file($_FILES['avatar']['tmp_name'], '/uploads/avatar.png');
+            }
+            PHP;
+
+        $titles = array_map(static fn ($finding) => $finding->title, $this->analyzeWithRule($code, 'SEC005'));
+        self::assertNotContains('Upload Without File-Type Validation', $titles);
+    }
+
+    public function testMultipleUploadsAreAnalyzedIndependently(): void
+    {
+        // The first upload is validated, the second is not; only the second
+        // must be reported.
+        $code = <<<'PHP'
+            <?php
+            $mime = finfo_file(finfo_open(FILEINFO_MIME_TYPE), $_FILES['safe']['tmp_name']);
+            move_uploaded_file($_FILES['safe']['tmp_name'], '/uploads/a');
+            move_uploaded_file($_FILES['unsafe']['tmp_name'], '/uploads/b');
+            PHP;
+
+        $findings = $this->analyzeWithRule($code, 'SEC005');
+        self::assertCount(1, $findings);
+        self::assertContains('Upload Without File-Type Validation', array_map(
+            static fn ($finding) => $finding->title,
+            $findings,
+        ));
+    }
 }

@@ -32,24 +32,30 @@ final class UnsafeUploadRule extends AbstractRule
     public const ID = 'SEC005';
 
     /**
-     * Constructs that, when present in the same scope as a move_uploaded_file
-     * call, signal that some file type validation is likely being performed.
+     * Constructs that, when operating on the specific `$_FILES` upload being
+     * moved, signal that the file is genuinely being validated. Grouped by the
+     * kind of validation they perform so that unrelated tallies (e.g. a
+     * `pathinfo()` on some other value) are not mistaken for proof of
+     * validation.
      *
-     * @var list<string>
+     * @var array<string, list<string>>
      */
     private const VALIDATION_FUNCTIONS = [
-        'getimagesize',
-        'finfo_open',
-        'finfo_file',
-        'mime_content_type',
-        'exif_imagetype',
-        'pathinfo',
-        'in_array',
-        'is_uploaded_file',
-        'substr',
-        'str_ends_with',
-        'str_contains',
-        'preg_match',
+        'mime' => [
+            'getimagesize',
+            'finfo_open',
+            'finfo_file',
+            'mime_content_type',
+            'exif_imagetype',
+        ],
+        'extension' => [
+            'pathinfo',
+            'str_ends_with',
+            'str_contains',
+        ],
+        'authenticity' => [
+            'is_uploaded_file',
+        ],
     ];
 
     public function id(): string
@@ -130,9 +136,12 @@ final class UnsafeUploadRule extends AbstractRule
             }
         }
 
-        // Issue 2: no detectable validation in the same scope, happening before
-        // the move. Validation that appears after the move cannot protect it.
-        if (!$this->hasValidation($scopeNodes, $node->getStartLine())) {
+        // Issue 2: no detectable validation of the specific upload being moved,
+        // happening before the move. Validation that operates on a different
+        // $_FILES entry, or that runs after the move, cannot protect this file.
+        $uploadKey = $this->uploadKeyOf($node, $assignments);
+
+        if (!$this->hasValidation($scopeNodes, $uploadKey, $node->getStartLine(), $assignments)) {
             $this->appendFinding($findings, $this->makeFinding(
                 'Upload Without File-Type Validation',
                 'move_uploaded_file() is used without detectable validation of the file type, MIME type or extension. '
@@ -241,47 +250,149 @@ final class UnsafeUploadRule extends AbstractRule
     }
 
     /**
-     * Returns true when a file-type / MIME / extension validation appears in the
-     * given statements on a line at or before `$moveLine`.
+     * Determines which `$_FILES` upload key the moved file's source belongs to,
+     * following chained variable assignments (e.g. the value of `$tmp` when it
+     * is assigned from `$_FILES['avatar']['tmp_name']`).
      *
-     * @param list<Node> $statements
+     * @param array<string, Expr> $assignments
      */
-    private function hasValidation(array $statements, int $moveLine): bool
+    private function uploadKeyOf(Expr\FuncCall $node, array $assignments): ?string
     {
-        $found = (new NodeFinder())->find(
-            $statements,
-            static fn (Node $candidate): bool => (
-                $candidate->getStartLine() <= $moveLine
-                && $candidate instanceof Expr\FuncCall
-                && $candidate->name instanceof Node\Name
-                && in_array(
-                    $candidate->name->toLowerString(),
-                    self::VALIDATION_FUNCTIONS,
-                    true,
-                )
-            ),
-        );
+        $args = $node->getArgs();
+        if (!isset($args[0]) || !$args[0]->value instanceof Expr) {
+            return null;
+        }
 
-        // Also detect direct MIME comparisons such as $mime === 'image/png'.
-        $mimeLiteral = (new NodeFinder())->find(
-            $statements,
-            static function (Node $candidate) use ($moveLine): bool {
-                if ($candidate->getStartLine() > $moveLine) {
-                    return false;
-                }
-                if ($candidate instanceof Expr\BinaryOp) {
-                    foreach ([$candidate->left, $candidate->right] as $operand) {
-                        if ($operand instanceof Node\Scalar\String_ && str_contains($operand->value, 'image/')) {
-                            return true;
-                        }
+        $resolved = $this->resolveValue($args[0]->value, $assignments);
+
+        return $this->filesKeyOf($resolved);
+    }
+
+    /**
+     * Returns the string literal `$_FILES` key of an expression, or null when
+     * the expression does not reference a directly identifiable upload field.
+     */
+    private function filesKeyOf(Expr $expr): ?string
+    {
+        $dims = (new NodeFinder())->find($expr, static function (Node $candidate) {
+            return $candidate instanceof Expr\ArrayDimFetch
+                && $candidate->var instanceof Expr\Variable
+                && is_string($candidate->var->name)
+                && strcasecmp($candidate->var->name, '_FILES') === 0;
+        });
+
+        foreach ($dims as $dim) {
+            if ($dim instanceof Expr\ArrayDimFetch && $dim->dim instanceof Node\Scalar\String_) {
+                return $dim->dim->value;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Returns true when a genuinely relevant validation (MIME/content,
+     * extension, authenticity or size) of the upload being moved appears on a
+     * line at or before `$moveLine`. When the upload key is unknown, a
+     * validation of any `$_FILES` entry is accepted as a fallback, which keeps
+     * the check conservative without treating unrelated tallies as proof.
+     *
+     * @param list<Node>                $statements
+     * @param array<string, Expr>       $assignments
+     */
+    private function hasValidation(array $statements, ?string $uploadKey, int $moveLine, array $assignments): bool
+    {
+        $exprs = (new NodeFinder())->find($statements, static fn (Node $candidate): bool => $candidate instanceof Expr);
+
+        foreach ($exprs as $expr) {
+            if (!$expr instanceof Expr || $expr->getStartLine() > $moveLine) {
+                continue;
+            }
+
+            if ($expr instanceof Expr\BinaryOp) {
+                foreach ([$expr->left, $expr->right] as $operand) {
+                    if (
+                        $operand instanceof Node\Scalar\String_
+                        && str_contains($operand->value, 'image/')
+                        && $this->expressionReferencesKey($expr, $uploadKey, $assignments)
+                    ) {
+                        return true;
+                    }
+
+                    if (
+                        $operand instanceof Expr\ArrayDimFetch
+                        && $this->dimensionName($operand) === 'size'
+                        && $this->expressionReferencesKey($operand, $uploadKey, $assignments)
+                    ) {
+                        return true;
                     }
                 }
+            }
 
-                return false;
-            },
-        );
+            if (
+                $expr instanceof Expr\FuncCall
+                && $expr->name instanceof Node\Name
+                && $this->categoryOf($expr->name->toLowerString()) !== null
+                && $this->expressionReferencesKey($expr, $uploadKey, $assignments)
+            ) {
+                return true;
+            }
+        }
 
-        return $found !== [] || $mimeLiteral !== [];
+        return false;
+    }
+
+    /**
+     * Returns true when the given expression (a potential validation construct)
+     * operates on the `$_FILES` upload being moved, following chained variable
+     * assignments. When the upload key is unknown, any `$_FILES` reference is
+     * accepted as a fallback so the check stays conservative.
+     *
+     * @param array<string, Expr> $assignments
+     */
+    private function expressionReferencesKey(Expr $expr, ?string $uploadKey, array $assignments): bool
+    {
+        $refs = (new NodeFinder())->find($expr, static function (Node $candidate) {
+            return $candidate instanceof Expr\Variable || $candidate instanceof Expr\ArrayDimFetch;
+        });
+
+        if ($refs === []) {
+            return false;
+        }
+
+        foreach ($refs as $ref) {
+            if (!$ref instanceof Expr) {
+                continue;
+            }
+            $resolved = $this->resolveValue($ref, $assignments);
+            $key = $this->filesKeyOf($resolved);
+
+            if ($key === null) {
+                continue;
+            }
+
+            if ($uploadKey === null || $key === $uploadKey) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function dimensionName(Expr\ArrayDimFetch $dim): ?string
+    {
+        return $dim->dim instanceof Node\Scalar\String_ ? strtolower($dim->dim->value) : null;
+    }
+
+    private function categoryOf(string $functionName): ?string
+    {
+        foreach (self::VALIDATION_FUNCTIONS as $category => $functions) {
+            if (in_array($functionName, $functions, true)) {
+                return $category;
+            }
+        }
+
+        return null;
     }
 
     /**
