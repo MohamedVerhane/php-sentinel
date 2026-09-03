@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<ruleset name="PHP Sentinel Coding Standard">
+    <description>PSR-12 based coding standard for PHP Sentinel.</description>
+
+    <arg value="p"/>
+    <arg name="colors"/>
+
+    <file>src</file>
+    <file>tests</file>
+    <file>bin</file>
+    <file>config</file>
+
+    <rule ref="PSR12"/>
+
+    <rule ref="Generic.Files.LineLength">
+        <properties>
+            <property name="lineLimit" value="160"/>
+            <property name="absoluteLineLimit" value="200"/>
+        </properties>
+    </rule>
+
+    <rule ref="Generic.PHP.ForbiddenFunctions">
+        <properties>
+            <property name="forbiddenFunctions" type="array">
+                <element key="var_dump" value="null"/>
+                <element key="print_r" value="null"/>
+                <element key="dd" value="null"/>
+                <element key="dump" value="null"/>
+            </property>
+        </properties>
+    </rule>
+</ruleset>

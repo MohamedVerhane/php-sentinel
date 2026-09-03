@@ -1,0 +1,36 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use PhpSentinel\Application;
+
+if (!class_exists(Application::class)) {
+    fwrite(
+        STDERR,
+        "PHP Sentinel dependencies are not installed. Run 'composer install' first.\n"
+    );
+    exit(2);
+}
+
+$application = Application::create();
+$application->setCatchExceptions(false);
+
+try {
+    $exitCode = $application->run();
+} catch (\Throwable $throwable) {
+    fwrite(STDERR, sprintf("PHP Sentinel: %s\n", $throwable->getMessage()));
+
+    if (array_intersect(
+        ['-v', '-vv', '-vvv', '--verbose'],
+        $_SERVER['argv'] ?? []
+    ) !== []) {
+        fwrite(STDERR, $throwable->getTraceAsString() . "\n");
+    }
+
+    $exitCode = 2;
+}
+
+exit($exitCode);
