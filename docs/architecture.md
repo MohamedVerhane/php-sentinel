@@ -49,24 +49,24 @@ capabilities (especially new rules).
 ### AST-based parsing
 
 Each file is parsed with `nikic/php-parser` into an Abstract Syntax Tree. The
-scanner **never includes, requires, or executes** the source it analyses — the
+scanner never includes, requires, or executes the source it analyses — the
 parser only reads text. Parse failures are captured as diagnostics rather than
 aborting the whole scan.
 
 ### Taint analysis
 
-`TaintAnalyzer` walks the AST in program order and answers one question: *is
-this expression derived from user-controlled input?*
+`TaintAnalyzer` walks the AST in program order and answers one question: is
+this expression derived from user-controlled input?
 
-- **Sources** — the PHP superglobals: `$_GET`, `$_POST`, `$_REQUEST`, `$_COOKIE`,
+- Sources — the PHP superglobals: `$_GET`, `$_POST`, `$_REQUEST`, `$_COOKIE`,
   `$_SERVER`, `$_FILES`.
-- **Propagation** — taint flows through assignments (including array elements,
+- Propagation — taint flows through assignments (including array elements,
   list destructuring and compound assignment), concatenation, string
   interpolation, casts, property/array access, and function/static-call
   arguments.
-- **Sanitizers** — a category-aware set of functions that neutralise taint for a
+- Sanitizers — a category-aware set of functions that neutralise taint for a
   specific sink category (e.g. `htmlspecialchars` for XSS, `escapeshellarg` for
-  command injection). Sanitization is tracked *per category*, so sanitizing for
+  command injection). Sanitization is tracked per category, so sanitizing for
   one sink type does not suppress a finding for another.
 
 Rules query the analyzer via `isDangerous($expr, $category)` and

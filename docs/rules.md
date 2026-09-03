@@ -1,14 +1,18 @@
 # Rules
 
-PHP Sentinel ships with a small, focused rule set. Each rule performs
-*static* analysis and reports a finding when user-controlled data reaches a
-dangerous sink without obvious sanitization. Findings are always worded as
-**potential** vulnerabilities — static analysis cannot prove a vulnerability
-exists, nor the absence of one.
+PHP Sentinel ships with a small, focused set of checks. They're all static: each
+one looks at the code without running it and reports when user-controlled data
+finds its way to a dangerous spot without any obvious sanitization along the
+way.
 
-> **Tip:** to enable a subset of rules, use the `rules`/`disabled_rules` keys in
-> a `.php-sentinel.php` config file, or pass `--severity` to filter by
-> severity.
+One thing worth saying up front: every finding is worded as a potential
+problem. A static scanner can't prove that something is a real vulnerability,
+and it can't prove that your code is safe either. It's there to point you at the
+places worth a second look, not to hand down a verdict.
+
+> Tip: if you only want some of these running, use the `rules` /
+> `disabled_rules` keys in a `.php-sentinel.php` config file, or narrow things
+> down with `--severity` to a specific severity and above.
 
 | ID     | Rule                 | Severity | CWE    |
 |--------|----------------------|----------|--------|
@@ -22,21 +26,22 @@ exists, nor the absence of one.
 
 ## SEC001 — SQL Injection
 
-**Severity:** High · **CWE:** CWE-89
+Severity: High · CWE: CWE-89
 
-### Detection
+### What it looks for
 
-Flags calls where user-controlled input is concatenated or interpolated into a
-SQL query that is then executed. Supported sinks:
+It flags calls where user input is glued into a SQL query — either through
+string concatenation or interpolation — and that query is then executed. The
+sinks it watches are:
 
 - Functions: `query`, `exec`, `multi_query`, `mysqli_query`, `mysqli_multi_query`.
 - Methods: `->query()`, `->exec()`, `->multi_query()`.
 
-Calls that use parameterised/prepared statements (e.g. `prepare()` +
-`execute()`) are **not** flagged, because parameters are bound separately from
-the query text.
+Calls that go through prepared statements (`prepare()` + `execute()`) are left
+alone, because with those the parameters are bound separately from the SQL text
+itself.
 
-### Fix
+### How to fix it
 
 Use prepared statements with bound parameters:
 
@@ -45,97 +50,100 @@ $stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id');
 $stmt->execute(['id' => $_GET['id']]);
 ```
 
-Never concatenate or interpolate user input into the SQL text, and apply strict
-allow-list validation when a dynamic identifier or keyword must be used.
+Just don't concatenate or interpolate user input into the SQL string. If you
+really need a dynamic identifier or keyword, validate it against a strict
+allow-list rather than passing raw input.
 
 ---
 
 ## SEC002 — Cross-Site Scripting (XSS)
 
-**Severity:** Medium · **CWE:** CWE-79
+Severity: Medium · CWE: CWE-79
 
-### Detection
+### What it looks for
 
-Flags places where user-controlled input reaches HTML output without escaping
-for an HTML context. Supported sinks:
+It flags spots where user input reaches HTML output without being escaped for
+an HTML context. The sinks are:
 
 - `echo`, `print`
-- `printf`, `sprintf`, `vprintf` arguments
+- arguments passed to `printf`, `sprintf`, `vprintf`
 
-Values passed through HTML-escaping functions (e.g. `htmlspecialchars`,
-`htmlentities`) are treated as sanitized and not flagged.
+Values that go through HTML-escaping functions such as `htmlspecialchars` or
+`htmlentities` count as handled, so they won't be reported.
 
-### Fix
+### How to fix it
 
-Encode all dynamic output with context-appropriate escaping:
+Escape anything dynamic when you output it, using escaping that matches the
+context:
 
 ```php
 echo htmlspecialchars($_GET['name'], ENT_QUOTES, 'UTF-8');
 ```
 
-Prefer a template engine that escapes by default, and apply a
-Content-Security-Policy to limit the impact of injection.
+If you can, lean on a template engine that escapes by default, and add a
+Content-Security-Policy so that even a slip doesn't do as much damage.
 
 ---
 
 ## SEC003 — Command Injection
 
-**Severity:** High · **CWE:** CWE-78
+Severity: High · CWE: CWE-78
 
-### Detection
+### What it looks for
 
-Flags user-controlled input reaching shell-execution sinks without escaping.
-Supported sinks:
+It flags user input reaching shell-execution sinks without escaping. The sinks:
 
 - Functions: `system`, `exec`, `shell_exec`, `passthru`, `proc_open`, `popen`.
 - Backtick shell execution `` `...` ``.
 
-Calls whose command is a constant or passed through `escapeshellarg` /
-`escapeshellcmd` are not flagged.
+Calls where the command is a fixed constant, or is passed through
+`escapeshellarg` / `escapeshellcmd`, aren't reported.
 
-### Fix
+### How to fix it
 
-Avoid invoking a shell entirely — prefer high-level APIs that do not run shell
-commands. If a shell is unavoidable, pass arguments via an array (e.g.
-`proc_open`) or escape arguments with `escapeshellarg`, and never interpolate
-raw input.
+Best of all, avoid starting a shell in the first place — there's usually a
+higher-level API that does the job without one. If you can't avoid it, pass
+arguments as an array (for example to `proc_open`) or at least escape each one
+with `escapeshellarg`. Never interpolate raw input straight into a command.
 
 ---
 
 ## SEC004 — File Inclusion
 
-**Severity:** High · **CWE:** CWE-98
+Severity: High · CWE: CWE-98
 
-### Detection
+### What it looks for
 
-Flags `include`, `include_once`, `require` and `require_once` statements whose
-path is influenced by user-controlled input (Local/Remote File Inclusion).
+It flags `include`, `include_once`, `require`, and `require_once` statements
+where the path is built from user input — that's your Local/Remote File
+Inclusion territory.
 
-### Fix
+### How to fix it
 
-Never use user input directly in include/require paths. Resolve paths against an
-explicit allow-list of known values, disable `allow_url_include`, and avoid
-dynamic include paths whenever possible.
+Don't let user input anywhere near an include/require path. Resolve paths
+against an explicit allow-list of known-good values, keep `allow_url_include`
+switched off, and steer clear of dynamic includes whenever you can.
 
 ---
 
 ## SEC005 — Unsafe File Upload
 
-**Severity:** Medium · **CWE:** CWE-434
+Severity: Medium · CWE: CWE-434
 
-### Detection
+### What it looks for
 
-Flags two classes of risky `move_uploaded_file()` usage:
+It flags two kinds of risky `move_uploaded_file()` usage:
 
-1. **User-controlled destination** — the destination/name is derived from
-   `$_FILES[...]['name']` without generating a safe random name.
-2. **Missing validation** — the call occurs in a scope with no detectable file
-   type / MIME / extension validation (e.g. no `finfo_file`, `getimagesize`,
-   `pathinfo`, `in_array` MIME checks, etc.).
+1. User-controlled destination — the destination or file name comes from
+   `$_FILES[...]['name']` without a safe random name being generated instead.
+2. Missing validation — the call happens in a scope where there's no
+   detectable file-type / MIME / extension check (no `finfo_file`,
+   `getimagesize`, `pathinfo`, or MIME `in_array` checks, and so on).
 
-### Fix
+### How to fix it
 
-Validate uploads: check the MIME type and real file content (e.g.
-`finfo_file` / `getimagesize`), whitelist allowed extensions and MIME types,
-generate a random destination name (never trust `$_FILES['name']`), store
-uploads outside the web root, and disable execution of uploaded files.
+Validate the upload before moving it: check the actual MIME type and file
+content (`finfo_file` / `getimagesize`), whitelist allowed extensions and MIME
+types, and use a randomly generated name rather than trusting
+`$_FILES['name']`. Keep uploads outside the web root, and make sure the web
+server can't execute whatever lands in the upload directory.

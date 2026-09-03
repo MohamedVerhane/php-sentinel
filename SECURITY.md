@@ -9,15 +9,15 @@
 
 ## Reporting a vulnerability
 
-PHP Sentinel is a static analysis tool; it does **not** execute scanned source
+PHP Sentinel is a static analysis tool; it does not execute scanned source
 code. That said, if you discover a security issue in the tool itself (for
 example, unsafe handling of untrusted paths, denial-of-service via crafted
 input, or an issue that could compromise the environment running the scanner),
-please **do not** open a public issue.
+please do not open a public issue.
 
 Report it privately to the maintainers by emailing:
 
-**security@example.invalid**
+security@example.invalid
 
 (Replace this address with the project maintainer's security contact before
 releasing.)

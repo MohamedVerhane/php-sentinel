@@ -5,7 +5,7 @@ documentation, and new features — are very welcome.
 
 ## Getting started
 
-1. **Fork** the repository and clone your fork.
+1. Fork the repository and clone your fork.
 2. Install dependencies:
 
    ```bash
@@ -23,8 +23,8 @@ documentation, and new features — are very welcome.
 
 ## Requirements
 
-- PHP **8.2** or newer.
-- Code style: **PSR-12** (enforced by `phpcs`).
+- PHP 8.2 or newer.
+- Code style: PSR-12 (enforced by `phpcs`).
 - All `src/` files use `declare(strict_types=1);`.
 - New public APIs should be documented with PHPDoc blocks.
 - No debug statements (`var_dump`, `print_r`, `dd`, `dump`) — these are blocked
@@ -45,7 +45,7 @@ composer cs-fix     # auto-fix coding standard violations
    `AbstractRule` for the shared finding builder).
 2. Register it in `src/Rules/RuleRegistry::withDefaultRules()`.
 3. Optionally add its ID to `Configuration::defaults()`.
-4. Add a **vulnerable** fixture under `tests/Fixtures/vulnerable/` and a **safe**
+4. Add a vulnerable fixture under `tests/Fixtures/vulnerable/` and a safe
    fixture under `tests/Fixtures/safe/`.
 5. Add a unit test class under `tests/Rules/` and, if needed, update
    `tests/ScannerIntegrationTest.php`.

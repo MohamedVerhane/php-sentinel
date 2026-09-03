@@ -34,14 +34,14 @@ Each rule has a write-up with remediation advice in [docs/rules.md](docs/rules.m
 
 ## A couple of things I care about
 
-- **It never runs your code.** It parses the source into an AST and reasons
+- It never runs your code. It parses the source into an AST and reasons
   about it statically. No includes, no requires, no execution of anything you
   scan.
-- **It doesn't just grep.** It tracks taint — where untrusted values flow —
+- It doesn't just grep. It tracks taint — where untrusted values flow —
   through assignments, string concatenation, interpolation, and function call
   arguments. It also knows about common sanitizers, so `htmlspecialchars()`
   doesn't get flagged as an XSS leak.
-- **It's quiet unless there's something to say.** If a scan is clean, it tells
+- It's quiet unless there's something to say. If a scan is clean, it tells
   you so and exits `0`. When it finds something, you get a readable report and
   a `1`. Bad arguments or config get you a `2`.
 
@@ -187,11 +187,11 @@ The build passes when the scan is clean and fails when it isn't.
 
 ## How it works, briefly
 
-1. **Discover** — it walks the paths you gave it, respecting ignores and file
+1. Discover — it walks the paths you gave it, respecting ignores and file
    types.
-2. **Parse** — each file becomes an AST via `nikic/php-parser`.
-3. **Analyse** — the taint engine follows user input to the sinks.
-4. **Report** — results come out as a console report or JSON.
+2. Parse — each file becomes an AST via `nikic/php-parser`.
+3. Analyse — the taint engine follows user input to the sinks.
+4. Report — results come out as a console report or JSON.
 
 There's a deeper write-up in [docs/architecture.md](docs/architecture.md) if you
 want the full picture.
